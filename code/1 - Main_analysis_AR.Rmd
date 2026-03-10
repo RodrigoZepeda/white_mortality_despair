@@ -154,7 +154,7 @@ adult_design <- samadult_midlife |>
 
 ### Setting adult bootstrap replicate weights
 set.seed(1234)
-replicates <- 10#500
+replicates <- 5#500
 
 
 boot_design <- svrep::as_bootstrap_design(adult_design, replicates = replicates)
@@ -204,11 +204,18 @@ for(i in seq_along(boot_reps)) {
     left_join(despair_data_merge, by = c("year_c", "race", "education")) |>
     mutate(race = fct_relevel(race, "Hispanics")) |>
     arrange(year_c, race) #|>
+  
+  data_educ <- data_educ |> 
+    arrange(race, education) |> 
+    group_by(year_c) |> 
+    mutate(grp = 1:n()) |> 
+    ungroup()
     #tsibble::as_tsibble(key = c(race, education), index = year_c) 
+  print(i)
   
   if (i == 1){
-    model <- tryCatch(
-      brms::brm(death_rate ~ ar(p = 1) + delta_despair * race * education + not_married_rt + 
+    model <- #tryCatch(
+      brm(death_rate ~ ar(p = 1,  gr = grp, time = year_c) + delta_despair * race * education + not_married_rt + 
                    not_labor_force_rt + unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt,
                 refresh = 0,
                 # family = gaussian(),
@@ -216,10 +223,10 @@ for(i in seq_along(boot_reps)) {
                 #   prior(normal(0, 10), class = b),
                 #   prior(cauchy(0, 2.5), class = sigma)
                 # ),
-                data = data_educ),
-      error = function(e) NULL)
+                data = data_educ)#,
+      #error = function(e) NULL)
   } else {
-    model <- update(model, newdata = data_educ, recompile = FALSE)
+    model <- update(model, newdata = data_educ, recompile = F)
   }
   
   if(is.null(model)) {
@@ -229,7 +236,7 @@ for(i in seq_along(boot_reps)) {
   
   ### standardization via g-formula to estimate the effect of delta_despair on change in mortality rates_t given mortality_rates_t-1. 
   adj_results[[i]] <- model |>
-    avg_slopes(variables = "delta_despair", by = c("race", "education")) |>
+    avg_slopes(variables = "delta_despair", by = c("race", "education"), incl_autocor = FALSE) |>
     broom::tidy() |>
     mutate(replicate = i, ok = T)
 

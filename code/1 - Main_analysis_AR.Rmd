@@ -154,7 +154,7 @@ adult_design <- samadult_midlife |>
 
 ### Setting adult bootstrap replicate weights
 set.seed(1234)
-replicates <- 5#500
+replicates <- 500
 
 
 boot_design <- svrep::as_bootstrap_design(adult_design, replicates = replicates)
@@ -197,7 +197,8 @@ for(i in seq_along(boot_reps)) {
     select(-year) |>
     arrange(year_c, education, race)
   
-  despair_data_merge <- left_join(despair_data, despair_lag_data, by = c("year_c", "education", "race")) |>
+  despair_data_merge <- left_join(despair_data, despair_lag_data, 
+                                  by = c("year_c", "education", "race")) |>
     mutate(delta_despair = despair - despair_lag)
   
   data_educ <- data_midlife_educ |>
@@ -242,7 +243,7 @@ for(i in seq_along(boot_reps)) {
 
 }
 
-save(adj_results, file = here("data/", "ar_adj_results.RData"))
+save(adj_results, file = here("data/", "ar_adj_results_bayes.RData"))
 
 ```
 
@@ -259,7 +260,7 @@ multicontrast <- adj_results |>
             ul_ci_pct = quantile(estimate, 0.975), 
             beta_used = n(), .groups = "drop") 
   
-write_csv(multicontrast, here("Results/", "delta_adj_estimates.csv"))
+write_csv(multicontrast, here("Results/", "delta_adj_estimates_bayes.csv"))
 
 ```
 

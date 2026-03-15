@@ -11,7 +11,8 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
 options(tinytex.verbose = TRUE, scipen = 999)
 
-mypckgs <- c("tidyverse", "here", "tidymodels", "survey", "srvyr", "nlme",  "svrep")
+mypckgs <- c("tidyverse", "here", "survey", "srvyr", "nlme", "foreach", 
+             "brms", "collapse", "marginaleffects")
 
 for (package in mypckgs) {
   library(package, character.only = T)
@@ -172,7 +173,10 @@ adult_design_k6 <- nhis_k6_midlife |>
 ### Setting adult replicates
 set.seed(1234)
 
-boot_design_k6 <- svrep::as_bootstrap_design(adult_design_k6, replicates = 500)
+replicates <- 500
+
+boot_design_k6 <- svrep::as_bootstrap_design(adult_design_k6, 
+                                             replicates = replicates)
 
 ## replicate weights matrix: n x k
 rep_wts_k6 <- weights(boot_design_k6, type = "analysis")
@@ -218,45 +222,78 @@ for(i in seq_along(boot_reps)) {
     left_join(despair_data_merge, by = c("year_c", "race", "education")) |>
     mutate(race = fct_relevel(race, "Hispanics")) |>
     arrange(year_c, race) |>
-    tsibble::as_tsibble(key = c(race, education), index = year_c) 
+    group_by(year_c) |> 
+    mutate(grp = 1:n()) |> 
+    ungroup()
   
   ### DOD models
-  ar_dod <- tryCatch(gls(dod_rate ~ lag_dod_rate + delta_despair * race * education + not_married_rt + 
-                 not_labor_force_rt + unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
-                       data = data_educ, 
-                     correlation = corAR1(form = ~ 1)), error = function(e) NULL)
+  if(i == 1) {
+  ar_dod <- tryCatch(
+    brm(dod_rate ~ ar(p = 1,  gr = grp, time = year_c) + delta_despair * race * 
+          education + not_married_rt + not_labor_force_rt + unemployed_rt + 
+          no_insurance_rt + union_mem_rt + below_fpl_rt, 
+        refresh = 0, 
+        data = data_educ), error = function(e) NULL)
+  } else {
+    ar_dod <- tryCacth(
+      update(ar_dod, newdata = data_educ, recompile = F), 
+      error = function(e) NULL)
+  }
   
    if(is.null(ar_dod)) {
     adj_results[[i]] <- tibble::tibble(replicate = i, ok = F)
     next
   }
+  if(i == 1) {
+  ar_overdose <- tryCatch(
+    brm(overdose_rate ~ ar(p = 1,  gr = grp, time = year_c) + delta_despair * 
+          race * education + not_married_rt + not_labor_force_rt + 
+          unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
+        refresh = 0,
+        data = data_educ), error = function(e) NULL)
+  } else{
+    ar_overdose <- tryCatch(
+      update(ar_overdose, newdata = data_educ, recompile = F), 
+      error = function(e) NULL)
+  }
   
-  ar_overdose <- tryCatch(gls(overdose_rate ~ lag_overdose_rate + delta_despair * race * education + not_married_rt + 
-                 not_labor_force_rt + unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
-                       data = data_educ, 
-                     correlation = corAR1(form = ~ 1)), error = function(e) NULL)
-  
-   if(is.null(ar_dod)) {
+   if(is.null(ar_overdose)) {
     adj_results[[i]] <- tibble::tibble(replicate = i, ok = F)
     next
   }
   
-  ar_suicide <- tryCatch(gls(suicide_rates ~ lag_suicide_rates + delta_despair * race * education + not_married_rt + 
-                 not_labor_force_rt + unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
-                       data = data_educ, 
-                     correlation = corAR1(form = ~ 1)), error = function(e) NULL)
+  if(i == 1) {
+  ar_suicide <- tryCatch(
+    brm(suicide_rates ~ ar(p = 1,  gr = grp, time = year_c) + delta_despair * 
+          race * education + not_married_rt + not_labor_force_rt + 
+          unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt,
+        refresh = 0, 
+        data = data_educ), error = function(e) NULL)
+  } else {
+    ar_suicide <- tryCatch(
+      update(ar_suicide, newdata = data_educ, recompile = F), 
+      error = function(e) NULL)
+  }
   
-  if(is.null(ar_dod)) {
+  if(is.null(ar_suicide)) {
     adj_results[[i]] <- tibble::tibble(replicate = i, ok = F)
     next
   }
   
-  ar_alcohol <- tryCatch(gls(alcohol_rates ~ lag_alcohol_rates + delta_despair * race * education + not_married_rt + 
-                 not_labor_force_rt + unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
-                       data = data_educ, 
-                     correlation = corAR1(form = ~ 1)), error = function(e) NULL)
+  if(i == 1) {
+  ar_alcohol <- tryCatch(
+    brm(alcohol_rates ~ ar(p = 1,  gr = grp, time = year_c) + delta_despair * 
+          race * education + not_married_rt + not_labor_force_rt + 
+          unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
+        refresh = 0, 
+        data = data_educ), error = function(e) NULL)
+  } else{
+    ar_alcohol <- tryCatch(
+      update(ar_alcohol, newdata = data_educ, recompile = F), 
+      error = function(e) NULL)
+  }
   
-  if(is.null(ar_dod)) {
+  if(is.null(ar_alcohol)) {
     adj_results[[i]] <- tibble::tibble(replicate = i, ok = F)
     next
   }
@@ -264,7 +301,8 @@ for(i in seq_along(boot_reps)) {
   ### standardization via g-formula to estimate the effect of delta_despair on change in mortality rates_t given mortality_rates_t-1. 
   model_dod_slopes <- ar_dod |>
     marginaleffects::avg_slopes(variables = "delta_despair", 
-                                by = c("race", "education")) |>
+                                by = c("race", "education"), 
+                                incl_autocor = FALSE) |>
     broom::tidy() |>
     mutate(outcome = "deaths of despair", 
            replicate = i, ok = T) |>
@@ -272,7 +310,8 @@ for(i in seq_along(boot_reps)) {
   
   model_overdose_slopes <- ar_overdose |>
     marginaleffects::avg_slopes(variables = "delta_despair", 
-                                by = c("race", "education")) |>
+                                by = c("race", "education"), 
+                                incl_autocor = FALSE) |>
     broom::tidy() |>
     mutate(outcome = "overdoses", 
            replicate = i, ok = T) |>
@@ -280,7 +319,8 @@ for(i in seq_along(boot_reps)) {
   
   model_suicide_slopes <- ar_suicide |>
     marginaleffects::avg_slopes(variables = "delta_despair", 
-                                by = c("race", "education")) |>
+                                by = c("race", "education"), 
+                                incl_autocor = FALSE) |>
     broom::tidy() |>
     mutate(outcome = "suicides", 
            replicate = i, ok = T) |>
@@ -288,18 +328,19 @@ for(i in seq_along(boot_reps)) {
   
   model_alcohol_slopes <- ar_alcohol |>
     marginaleffects::avg_slopes(variables = "delta_despair", 
-                                by = c("race", "education")) |>
+                                by = c("race", "education"), 
+                                incl_autocor = FALSE) |>
     broom::tidy() |>
     mutate(outcome = "alcohol", 
            replicate = i, ok = T) |>
     relocate(outcome, .before = term)
   
-  model_slopes <- model_dod_slopes |>
-    bind_rows(model_overdose_slopes, model_suicide_slopes, model_alcohol_slopes)
+  adj_results_k6[[i]] <- 
+    bind_rows(model_dod_slopes, 
+              model_overdose_slopes, 
+              model_suicide_slopes, 
+              model_alcohol_slopes)
   
-  
-  adj_results_k6[[i]] <- model_slopes
-
 }
 
 save(adj_results_k6, file = here("data/", "ar_adj_results_k6_dod.RData"))

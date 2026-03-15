@@ -11,7 +11,8 @@ knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 
 options(tinytex.verbose = TRUE, scipen = 999)
 
-mypckgs <- c("tidyverse", "here", "survey", "srvyr", "nlme", "foreach")
+mypckgs <- c("tidyverse", "here", "survey", "srvyr", "nlme", "foreach", 
+             "brms", "collapse", "marginaleffects")
 
 for (package in mypckgs) {
   library(package, character.only = T)
@@ -48,8 +49,7 @@ data_deaths <- data_deaths |>
                                      "50 - 54 yo", "55 - 59 yo", "60 - 64 yo", 
                                      "65 - 69 yo", "70 - 74 yo", "75 - 79 yo", 
                                      "80+ yo")), 
-         year_c = year - 1998, 
-         deaths_despair = rowSums(pick(od_deaths, suicides, alc.liver.cirr))) |>
+         year_c = year - 1998) |>
   select(!age_cat) |>
   rename(age_cat = age_cat2, 
          education = educ_cat, 
@@ -61,10 +61,7 @@ death_educ <- data_deaths |>
   filter(midlife == 1 & race != "NH Other race") |>
   droplevels() |>
   group_by(year_c, education, race) |>
-  summarize(deaths_despair = sum(deaths_despair), 
-            od_deaths = sum(od_deaths), 
-            suicides = sum(suicides), 
-            alc.liver.cirr = sum(alc.liver.cirr), .groups = "drop")  |>
+  summarize(n = sum(any_deaths), .groups = "drop")  |>
   drop_na()
 
 ### Load population estimates for denominators of mortality rates from the Current Population Survey.
@@ -83,22 +80,16 @@ data_midlife_educ_nolag <- death_educ |>
   filter(year_c > 1) |>
   left_join(pop_educ |> filter(year_c > 1), by = c("year_c", "race", "education")) |>
   mutate(year_c = year_c - 1, ### to not have missings I am going to make year_c start at 1 for both the lag and not lagged mortality rate.
-         dod_rate = (deaths_despair / population) * 100000,
-         overdose_rate = (od_deaths / population) * 100000,
-         suicide_rates = (suicides / population) * 100000,
-         alcohol_rates = (alc.liver.cirr / population) * 100000,
+         death_rate = (n / population) * 100000, 
          log_year = log(year_c)) |>
-  select(year_c, log_year, race, education, dod_rate, overdose_rate, suicide_rates, alcohol_rates)
+  select(year_c, log_year, death_rate, race, education)
 
 ### calculate mortality rates between 1999 - 2015. This is the lagged time series of $death_{t} = death_{t = 1999} + ... + death_{t = 2015}$ 
 data_midlife_educ_lag <- death_educ |>
   filter(year_c < 18) |>
   left_join(pop_educ |> filter(year_c < 18), by = c("year_c", "race", "education")) |>
-  mutate(lag_dod_rate = (deaths_despair / population) * 100000,
-         lag_overdose_rate = (od_deaths / population) * 100000,
-         lag_suicide_rates = (suicides / population) * 100000,
-         lag_alcohol_rates = (alc.liver.cirr / population) * 100000) |>
-  select(year_c, race, education, lag_dod_rate, lag_overdose_rate, lag_suicide_rates, lag_alcohol_rates)
+  mutate(lag_death_rate = (n / population) * 100000) |>
+  select(year_c, lag_death_rate, race, education)
 
 ### load data on confounders
 load(here("data/", "confounders_midlife_educ_between.RData"))
@@ -170,9 +161,9 @@ adult_design_k6 <- nhis_k6_midlife |>
 ```{r}
 ### Setting adult bootstrap replicate weights
 set.seed(1234)
+replicates <- 500
 
-
-boot_design_k6 <- svrep::as_bootstrap_design(adult_design_k6, replicates = 500)
+boot_design_k6 <- svrep::as_bootstrap_design(adult_design_k6, replicates = replicates)
 
 ## replicate weights matrix: n x k
 rep_wts_k6 <- weights(boot_design_k6, type = "analysis")
@@ -213,19 +204,31 @@ for(i in seq_along(boot_reps)) {
     select(-year) |>
     arrange(year_c, education, race)
   
-  despair_data_merge <- left_join(despair_data, despair_lag_data, by = c("year_c", "education", "race")) |>
+  despair_data_merge <- left_join(despair_data, despair_lag_data, 
+                                  by = c("year_c", "education", "race")) |>
     mutate(delta_despair = despair - despair_lag)
   
   data_educ <- data_midlife_educ |>
     left_join(despair_data_merge, by = c("year_c", "race", "education")) |>
     mutate(race = fct_relevel(race, "Hispanics")) |>
-    arrange(year_c, race) |>
-    tsibble::as_tsibble(key = c(race, education), index = year_c) 
+    arrange(year_c, race) 
   
-  model <- tryCatch(gls(death_rate ~ lag_death_rate + delta_despair * race * education + not_married_rt + 
-                 not_labor_force_rt + unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
-                       data = data_educ, 
-                     correlation = corAR1(form = ~ 1)), error = function(e) NULL)
+  data_educ <- data_educ |>
+    arrange(race, education) |> 
+    group_by(year_c) |> 
+    mutate(grp = 1:n()) |> 
+    ungroup()
+  
+  if(i == 1) {
+  model <- tryCatch(
+    brm(death_rate ~ ar(p = 1,  gr = grp, time = year_c) + delta_despair * 
+          race * education + not_married_rt + not_labor_force_rt + 
+          unemployed_rt + no_insurance_rt + union_mem_rt + below_fpl_rt, 
+        refresh = 0, data = data_educ),
+    error = function(e) NULL)
+  } else {
+    model <- update(model, newdata = data_educ, recompile = F)
+  }
   
   if(is.null(model)) {
     adj_results_k6[[i]] <- tibble::tibble(replicate = i, ok = F)
@@ -235,13 +238,14 @@ for(i in seq_along(boot_reps)) {
   ### standardization via g-formula to estimate the effect of delta_despair on change in mortality rates_t given mortality_rates_t-1. 
   adj_results_k6[[i]] <- model |>
     marginaleffects::avg_slopes(variables = "delta_despair", 
-                            by = c("race", "education")) |>
+                            by = c("race", "education"), 
+                            incl_autocor = FALSE) |>
     broom::tidy() |>
     mutate(replicate = i, ok = T)
 
 }
 
-save(adj_results_k6, file = here("data/", "ar_adj_results_k6_deaths.RData"))
+save(adj_results_k6, file = here("data/", "ar_adj_results_k6_bayes.RData"))
 
 
 ```
@@ -259,7 +263,7 @@ multicontrast_k6 <- adj_results_k6 |>
             ul_ci_pct = quantile(estimate, 0.975), 
             beta_used = n(), .groups = "drop") 
   
-write_csv(multicontrast_k6, here("Results/", "death_adj_estimates_k6.csv"))
+write_csv(multicontrast_k6, here("Results/", "delta_adj_estimates_k6_bayes.csv"))
 
 ```
 
